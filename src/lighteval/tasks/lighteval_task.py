@@ -177,6 +177,15 @@ class LightevalTaskConfig:
                         if isinstance(metric_v, functools.partial):
                             func_name = getattr(metric_v.func, "__name__", str(metric_v.func))
                             repr_v = f"partial({func_name}, ...)"
+                        elif isinstance(metric_v, dict):
+                            repr_v = repr(
+                                {
+                                    key: getattr(value, "__name__", repr(value))
+                                    if isinstance(value, Callable)
+                                    else value
+                                    for key, value in metric_v.items()
+                                }
+                            )
                         elif isinstance(metric_v, Callable):
                             repr_v = getattr(metric_v, "__name__", repr(metric_v))
                         elif isinstance(metric_v, Metric.get_allowed_types_for_metrics()):

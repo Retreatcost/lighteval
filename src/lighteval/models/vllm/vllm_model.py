@@ -416,7 +416,35 @@ class VLLMModel(LightevalModel):
                 )
                 results.append(cur_response)
 
-        return dataset.get_original_order(results)
+        results = dataset.get_original_order(results)
+        return self._greedy_until_second_turn(docs, results)
+
+    def _greedy_until_second_turn(self, docs: list[Doc], results: list[ModelResponse]) -> list[ModelResponse]:
+        second_turn_docs = []
+        second_turn_indices = []
+        for index, (doc, response) in enumerate(zip(docs, results)):
+            turns = (doc.specific or {}).get("multi_turn_queries", [])
+            if len(turns) < 2:
+                continue
+            if len(response.text) != 1:
+                raise ValueError("Multi-turn generation requires exactly one first-turn response per sample")
+
+            from copy import deepcopy
+
+            second_turn_doc = deepcopy(doc)
+            second_turn_doc.query = turns[1]
+            second_turn_doc.specific = {}
+            second_turn_doc.fewshot_samples.append(Doc(query=turns[0], choices=[response.text[0]], gold_index=0))
+            second_turn_docs.append(second_turn_doc)
+            second_turn_indices.append(index)
+
+        if second_turn_docs:
+            second_turn_responses = self._greedy_until(second_turn_docs)
+            for index, second_turn_response in zip(second_turn_indices, second_turn_responses):
+                results[index].text.extend(second_turn_response.text)
+                results[index].output_tokens.extend(second_turn_response.output_tokens)
+
+        return results
 
     def _generate(
         self,

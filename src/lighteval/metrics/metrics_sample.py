@@ -1044,38 +1044,55 @@ class JudgeLLMSimpleQA(JudgeLLM):
 
 
 class JudgeLLMMTBench(JudgeLLM):
-    def compute(self, model_response: list[ModelResponse], doc: list[Doc], **kwargs):
-        """Compute the score of a generative task using a llm as a judge.
-        The generative task can be multiturn with 2 turns max, in that case, we
-        return scores for turn 1 and 2. Also returns user_prompt and judgement
-        which are ignored later by the aggregator.
-        """
+    def __str__(self):
+        return (
+            f"{self.__class__.__name__}(model={self.judge.model}, backend={self.judge.backend}, "
+            f"template={self.judge.template.__name__}, "
+            f"process_judge_response={self.judge.process_judge_response.__name__})"
+        )
+
+    def compute(self, responses: list[ModelResponse], docs: list[Doc], **kwargs):
+        """Compute turn-level scores for a batch of two-turn conversations."""
         import json
 
-        model_responses = as_list(model_response)
-        docs = as_list(doc)
+        model_responses = as_list(responses)
+        docs = as_list(docs)
+        questions = []
+        answers = []
+        golds = []
 
-        # If we are evaluating a multiturn task, we need to have specific field in the formatted doc
-        questions = [doc.specific["multi_turn_queries"] for doc in docs]
-        golds = [doc.specific.get("reference", None) for doc in docs]
-        predictions = [response.final_text[0] for response in model_responses]
+        for response, formatted_doc in zip(model_responses, docs):
+            turns = formatted_doc.specific["multi_turn_queries"]
+            predictions = response.final_text
+            references = formatted_doc.specific.get("reference") or [None, None]
+            if not (len(turns) == len(predictions) == len(references) == 2):
+                raise ValueError("MT-Bench requires two questions, predictions, and references per sample")
 
-        query_context_1 = {"query": questions[0], "context": ""}
-        query_context_2 = {"query": questions[1], "context": predictions[0]}
+            questions.extend(
+                [
+                    json.dumps({"query": turns[0], "context": ""}, indent=2),
+                    json.dumps({"query": turns[1], "context": predictions[0]}, indent=2),
+                ]
+            )
+            answers.extend(predictions)
+            golds.extend(references)
 
-        score_turn_1, message_turn_1, judgement_turn_1 = self.judge.evaluate_answer(
-            question=json.dumps(query_context_1, indent=2), answer=predictions[0], gold=golds[0] if golds else None
+        scores, messages, judgements = self.judge.evaluate_answer_batch(
+            questions=questions,
+            answers=answers,
+            options=[None] * len(questions),
+            golds=golds,
         )
-        score_turn_2, message_turn_2, judgement_turn_2 = self.judge.evaluate_answer(
-            question=json.dumps(query_context_2, indent=2), answer=predictions[1], gold=golds[1] if golds else None
-        )
 
-        return {
-            "judge_score_turn_1": score_turn_1,
-            "judge_score_turn_2": score_turn_2,
-            "user_prompt": [message_turn_1, message_turn_2],
-            "judgement": [judgement_turn_1, judgement_turn_2],
-        }
+        return [
+            {
+                "judge_score_turn_1": scores[index],
+                "judge_score_turn_2": scores[index + 1],
+                "user_prompt": messages[index : index + 2],
+                "judgement": judgements[index : index + 2],
+            }
+            for index in range(0, len(scores), 2)
+        ]
 
 
 class JudgeLLMMixEval(JudgeLLM):

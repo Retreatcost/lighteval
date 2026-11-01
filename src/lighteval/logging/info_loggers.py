@@ -336,14 +336,17 @@ class MetricsLogger:
         """
         for task_name, metrics in self.metrics_values.items():
             task = task_dict[task_name]
+            aggregations = task.aggregation()
 
             skip_metric = []
             for metric_name, metric_values in metrics.items():
                 if metric_name in skip_metric:
                     # The metric is in a subset which has already been computed and saved
                     continue
+                if metric_name not in aggregations:
+                    continue
 
-                aggregation = task.aggregation()[metric_name]
+                aggregation = aggregations[metric_name]
 
                 try:
                     metric_result = aggregation(metric_values)

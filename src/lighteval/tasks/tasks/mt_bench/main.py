@@ -67,6 +67,7 @@ llm_judge_mt_bench = SampleLevelMetricGrouping(
     metric_name=["judge_score_turn_1", "judge_score_turn_2"],
     higher_is_better={"judge_score_turn_1": True, "judge_score_turn_2": True},
     category=SamplingMethod.GENERATIVE,
+    batched_compute=True,
     sample_level_fn=JudgeLLMMTBench(
         judge_model_name="flowaicom/Flow-Judge-v0.1",
         template=flow_judge_mt_bench_prompt,
