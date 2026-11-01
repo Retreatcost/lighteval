@@ -284,7 +284,11 @@ class VLLMModel(LightevalModel):
             self.model_args["load_format"] = config.load_format
 
         if config.data_parallel_size > 1:
-            self.model_args["distributed_executor_backend"] = "ray"
+            if config.tensor_parallel_size == 1 and config.pipeline_parallel_size == 1:
+                # The outer Ray tasks already isolate single GPUs; nesting Ray breaks runtime environment setup.
+                self.model_args["distributed_executor_backend"] = "mp"
+            else:
+                self.model_args["distributed_executor_backend"] = "ray"
             self._batch_size = "auto"
 
             if self._max_length is None:

@@ -22,6 +22,7 @@
 
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -403,6 +404,38 @@ def cached(sampling_method: SamplingMethod = None):  # noqa C901
                     f"Cache: {cached_count}/{len(docs)} samples are cached for tasks {', '.join(t_id.task_name for t_id in tasks_with_cached_samples)}"
                 )
 
+            def finish_caching(new_results):
+                if docs_not_cached:
+                    # Store new results in file cache. Under a data-parallel launch (e.g. accelerate with
+                    # several processes), every rank holds the full, gathered results, so only the main
+                    # process writes the cache file. Letting every rank write the same parquet concurrently
+                    # corrupts it and makes subsequent loads fail. Other ranks wait at the barrier below
+                    # before reading. See https://github.com/huggingface/lighteval/issues/1102.
+                    accelerator = getattr(self, "accelerator", None)
+                    if accelerator is None or accelerator.is_main_process:
+                        cache.cache_samples(
+                            docs=docs_not_cached,
+                            results=new_results,
+                            task_ids=task_ids,
+                            sampling_method=sampling_method,
+                        )
+                    if accelerator is not None:
+                        accelerator.wait_for_everyone()
+
+                # 3) Create final results by pulling from newly saved file cache
+                final_cached_results = cache.get_samples_from_cache(docs, task_ids, sampling_method)
+
+                # 4) Cache files are already partitioned per sampling method, so the loaded
+                # samples are correct as-is. (get_sampling_method() infers the method from
+                # sample content and cannot tell PERPLEXITY from LOGPROBS, so re-filtering
+                # here would drop all PERPLEXITY samples.)
+                final_results = list(final_cached_results)
+
+                if any(r is None for r in final_results):
+                    raise ValueError("Problem while loading and aggregating items from cache.")
+
+                return final_results
+
             # 2) Process not cached docs and save to file
             new_results = []
             if docs_not_cached:
@@ -414,35 +447,15 @@ def cached(sampling_method: SamplingMethod = None):  # noqa C901
                 )
                 new_results = func(self, docs_not_cached, *args, **kwargs)
 
-                # Store new results in file cache. Under a data-parallel launch (e.g. accelerate with
-                # several processes), every rank holds the full, gathered results, so only the main
-                # process writes the cache file. Letting every rank write the same parquet concurrently
-                # corrupts it and makes subsequent loads fail. Other ranks wait at the barrier below
-                # before reading. See https://github.com/huggingface/lighteval/issues/1102.
-                accelerator = getattr(self, "accelerator", None)
-                if accelerator is None or accelerator.is_main_process:
-                    cache.cache_samples(
-                        docs=docs_not_cached,
-                        results=new_results,
-                        task_ids=task_ids,
-                        sampling_method=sampling_method,
-                    )
-                if accelerator is not None:
-                    accelerator.wait_for_everyone()
+            if inspect.isawaitable(new_results) or inspect.iscoroutinefunction(func):
 
-            # 3) Create final results by pulling from newly saved file cache
-            final_cached_results = cache.get_samples_from_cache(docs, task_ids, sampling_method)
+                async def finish_async():
+                    # Async callers need an awaitable even when every result is already cached.
+                    results = await new_results if inspect.isawaitable(new_results) else new_results
+                    return finish_caching(results)
 
-            # 4) Cache files are already partitioned per sampling method, so the loaded
-            # samples are correct as-is. (get_sampling_method() infers the method from
-            # sample content and cannot tell PERPLEXITY from LOGPROBS, so re-filtering
-            # here would drop all PERPLEXITY samples.)
-            final_results = list(final_cached_results)
-
-            if any(r is None for r in final_results):
-                raise ValueError("Problem while loading and aggregating items from cache.")
-
-            return final_results
+                return finish_async()
+            return finish_caching(new_results)
 
         return wrapper
 

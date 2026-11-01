@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import asyncio
 import sys
 import unittest
 from types import ModuleType
@@ -50,6 +51,26 @@ class TestVLLMPromptConstruction(unittest.TestCase):
                 {"kind": "tokens_prompt", "prompt_token_ids": [3]},
             ],
         )
+
+
+class TestVLLMDataParallelBackend(unittest.TestCase):
+    def test_single_gpu_workers_use_multiprocess_backend(self):
+        model = VLLMModel.__new__(VLLMModel)
+        model._max_length = 4096
+        config = VLLMModelConfig(model_name="test-model", data_parallel_size=2)
+
+        self.assertIsNone(model._create_auto_model(config))
+        self.assertEqual(model.model_args["distributed_executor_backend"], "mp")
+
+    def test_model_parallel_workers_keep_ray_backend(self):
+        for parallel_args in ({"tensor_parallel_size": 2}, {"pipeline_parallel_size": 2}):
+            with self.subTest(parallel_args=parallel_args):
+                model = VLLMModel.__new__(VLLMModel)
+                model._max_length = 4096
+                config = VLLMModelConfig(model_name="test-model", data_parallel_size=2, **parallel_args)
+
+                self.assertIsNone(model._create_auto_model(config))
+                self.assertEqual(model.model_args["distributed_executor_backend"], "ray")
 
 
 class TestVLLMTokenizerCreation(unittest.TestCase):
@@ -84,3 +105,29 @@ class TestVLLMModelUseChatTemplate(unittest.TestCase):
 
                 self.assertEqual(model.use_chat_template, expected_result)
                 self.assertEqual(model.use_chat_template, model._tokenizer.chat_template is not None)
+
+
+class TestAsyncPipelineCleanup(unittest.TestCase):
+    def test_cleanup_runs_inside_active_event_loop(self):
+        from lighteval.pipeline import Pipeline
+        from lighteval.tasks.requests import SamplingMethod
+
+        class Model:
+            is_async = True
+            loop = None
+            cleanup_calls = 0
+
+            async def greedy_until(self, docs):
+                self.loop = asyncio.get_running_loop()
+                return ["response"]
+
+            def cleanup(self):
+                assert asyncio.get_running_loop() is self.loop
+                self.cleanup_calls += 1
+
+        pipeline = Pipeline.__new__(Pipeline)
+        pipeline.model = Model()
+        pipeline.sampling_docs = {SamplingMethod.GENERATIVE: ["doc"]}
+
+        self.assertEqual(pipeline._run_model(), {SamplingMethod.GENERATIVE: ["response"]})
+        self.assertEqual(pipeline.model.cleanup_calls, 1)

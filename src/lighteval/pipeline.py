@@ -297,18 +297,21 @@ class Pipeline:
             self.evaluation_tracker.details_logger.aggregate()
 
     async def _run_model_async(self):
-        outputs = {}
-        for sampling_method, docs in self.sampling_docs.items():
-            logger.info(f"Running {sampling_method} requests")
-            match sampling_method:
-                case SamplingMethod.GENERATIVE:
-                    model_outputs = await self.model.greedy_until(docs)
-                    outputs[sampling_method] = model_outputs
-                case SamplingMethod.LOGPROBS:
-                    model_outputs = await self.model.loglikelihood(docs)
-                    outputs[sampling_method] = model_outputs
+        try:
+            outputs = {}
+            for sampling_method, docs in self.sampling_docs.items():
+                logger.info(f"Running {sampling_method} requests")
+                match sampling_method:
+                    case SamplingMethod.GENERATIVE:
+                        model_outputs = await self.model.greedy_until(docs)
+                        outputs[sampling_method] = model_outputs
+                    case SamplingMethod.LOGPROBS:
+                        model_outputs = await self.model.loglikelihood(docs)
+                        outputs[sampling_method] = model_outputs
 
-        return outputs
+            return outputs
+        finally:
+            self.model.cleanup()
 
     def _run_model_sync(self):
         # Running all requests depending on the model call type (log likelihood, generative, ...)
@@ -335,9 +338,9 @@ class Pipeline:
         logger.info("--- RUNNING MODEL ---")
 
         if self.model.is_async:
-            outputs = asyncio.run(self._run_model_async())
-        else:
-            outputs = self._run_model_sync()
+            return asyncio.run(self._run_model_async())
+
+        outputs = self._run_model_sync()
 
         # Cleaning up the model before running metrics
         self.model.cleanup()

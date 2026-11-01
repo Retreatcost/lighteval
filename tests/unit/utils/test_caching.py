@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import asyncio
 import tempfile
 import unittest
 from dataclasses import asdict
@@ -274,6 +275,36 @@ class TestCaching(unittest.TestCase):
                     ("loglikelihood", SamplingMethod.LOGPROBS),
                 ],
             )
+
+    @patch("lighteval.models.vllm.vllm_model.AsyncVLLMModel._create_auto_model")
+    @patch("lighteval.models.vllm.vllm_model.AsyncVLLMModel._async_batch")
+    def test_cache_async_vllm(self, mock_async_batch, mock_create_model):
+        from lighteval.models.vllm.vllm_model import AsyncVLLMModel, VLLMModelConfig
+
+        vllm_responses = []
+        for response in self.model_responses:
+            vllm_response = Mock()
+            vllm_response.prompt_token_ids = response.input_tokens
+            vllm_response.outputs = [
+                Mock(token_ids=response.output_tokens[0], logprobs=[], text=response.text[0]),
+            ]
+            vllm_responses.append(vllm_response)
+        mock_async_batch.return_value = vllm_responses
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = VLLMModelConfig(model_name="Qwen/Qwen3-0.6B", cache_dir=temp_dir)
+            model = AsyncVLLMModel(config)
+
+            cold_results = asyncio.run(model.greedy_until(self.docs))
+            warm_results = asyncio.run(model.greedy_until(self.docs))
+
+            self.assertEqual(
+                [asdict(response) for response in cold_results], [asdict(response) for response in warm_results]
+            )
+            self.assertEqual(
+                [response.text for response in cold_results], [response.text for response in self.model_responses]
+            )
+            mock_async_batch.assert_awaited_once()
 
     @patch("requests.get")
     @patch("lighteval.models.endpoints.tgi_model.ModelClient._greedy_until")
